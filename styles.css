@@ -1,0 +1,286 @@
+:root {
+  color-scheme: dark;
+  --bg: #191c1d;
+  --panel: #242829;
+  --header: #293f46;
+  --grid: #3d484b;
+  --grid-strong: #506064;
+  --text: #eef5f4;
+  --muted: #a8b5b7;
+  --green: #4cff72;
+  --blue: #54c8ff;
+  --red: #ff5b5b;
+  --accent: #6bd0c7;
+  --cash: #d6e6ff;
+  --collateral: #ffc96b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+  font: 12px/1.4 Arial, Helvetica, sans-serif;
+}
+
+.app-shell {
+  min-height: 100vh;
+  border-top: 1px solid #9ba5aa;
+}
+
+.topbar {
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  min-height: 58px;
+  background: var(--header);
+  border-bottom: 1px solid #5e7078;
+}
+
+.tabs {
+  display: flex;
+  align-items: stretch;
+  overflow-x: auto;
+}
+
+.tab {
+  min-width: 104px;
+  padding: 0 20px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: #c9d0d3;
+  font: 700 12px Arial, Helvetica, sans-serif;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.tab.active {
+  color: #fff;
+  border-bottom-color: var(--accent);
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  white-space: nowrap;
+}
+
+.btn {
+  min-height: 32px;
+  border: 1px solid #66808b;
+  padding: 0 12px;
+  color: #fff;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.btn.primary {
+  background: #176f91;
+}
+
+.btn.secondary {
+  background: #3b4a50;
+}
+
+.btn:disabled {
+  opacity: .55;
+  cursor: wait;
+}
+
+.config-strip {
+  display: grid;
+  grid-template-columns: minmax(280px, 520px) auto;
+  gap: 14px;
+  align-items: end;
+  padding: 10px 12px;
+  background: #2b2b2b;
+  border-bottom: 1px solid var(--grid);
+}
+
+label {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.switch {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 28px;
+}
+
+.grid-wrap {
+  width: 100%;
+  overflow: auto;
+}
+
+table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+th,
+td {
+  height: 28px;
+  border-right: 1px solid var(--grid);
+  border-bottom: 1px solid var(--grid);
+  padding: 3px 6px;
+  background: #242424;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  height: 46px;
+  background: #34393a;
+  color: #fff;
+  font-size: 11px;
+  text-align: left;
+}
+
+tr.running td {
+  background: #1f3337;
+}
+
+tr.success td {
+  background: #17271d;
+}
+
+tr.failed td {
+  background: #321f22;
+}
+
+.tiny {
+  width: 28px;
+  min-width: 28px;
+  text-align: center;
+}
+
+input,
+select {
+  width: 100%;
+  min-width: 86px;
+  height: 22px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  outline: none;
+  font: inherit;
+}
+
+input:focus,
+select:focus {
+  border-color: var(--accent);
+  background: #1e2b31;
+  color: #fff;
+}
+
+input[type="checkbox"] {
+  width: 16px;
+  min-width: 16px;
+  height: 16px;
+  accent-color: #8e989d;
+}
+
+input[type="time"] {
+  min-width: 82px;
+}
+
+select {
+  min-width: 96px;
+}
+
+.alias,
+.client-code {
+  min-width: 96px;
+}
+
+.api-key {
+  min-width: 250px;
+}
+
+.api-secret,
+.totp-secret {
+  min-width: 148px;
+}
+
+.pin {
+  min-width: 80px;
+}
+
+.money {
+  color: var(--green);
+  font-weight: 700;
+  text-align: right;
+}
+
+.margin {
+  color: var(--muted);
+  font-weight: 700;
+  min-width: 118px;
+  text-align: right;
+}
+
+.net-margin {
+  color: #f4fbff;
+}
+
+.cash-margin {
+  color: var(--cash);
+}
+
+.collateral-margin {
+  color: var(--collateral);
+}
+
+.payout-margin {
+  color: #d7b7ff;
+}
+
+.login-state,
+.status {
+  color: var(--muted);
+  min-width: 110px;
+}
+
+.icon {
+  width: 22px;
+  height: 22px;
+  border: 0;
+  background: transparent;
+  color: var(--blue);
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.icon.danger {
+  color: var(--red);
+}
+
+@media (max-width: 760px) {
+  .topbar,
+  .config-strip {
+    grid-template-columns: 1fr;
+    display: grid;
+  }
+
+  .actions,
+  .summary {
+    justify-content: start;
+    text-align: left;
+  }
+}

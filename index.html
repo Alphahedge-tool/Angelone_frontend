@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Angel One Multi Client Login</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <nav class="tabs" aria-label="Main sections">
+          <button class="tab">Order Book</button>
+          <button class="tab">Positions</button>
+          <button class="tab active">User Settings</button>
+          <button class="tab">Strategies</button>
+          <button class="tab">Multi-leg</button>
+        </nav>
+        <section class="actions" aria-label="Account actions">
+          <button id="addClientBtn" class="btn secondary" type="button">Add Client</button>
+          <button id="autoLoginBtn" class="btn primary" type="button">Auto Login</button>
+        </section>
+      </header>
+
+      <section class="config-strip" aria-label="Backend configuration">
+        <label>
+          Backend URL
+          <input id="backendUrl" type="url" value="http://localhost:3001/api/angel/auto-login">
+        </label>
+        <label class="switch">
+          <input id="demoMode" type="checkbox">
+          <span>Demo mode - fake margins</span>
+        </label>
+      </section>
+
+      <section class="grid-wrap" aria-label="Client settings">
+        <table>
+          <thead>
+            <tr>
+              <th class="tiny"><input id="selectAll" type="checkbox" aria-label="Select all clients"></th>
+              <th>Enable</th>
+              <th>Delete</th>
+              <th>Logout</th>
+              <th>Manual Square Off</th>
+              <th>Logged In</th>
+              <th>MTM (All)</th>
+              <th>MIS MTM</th>
+              <th>NRML MTM</th>
+              <th>Net Margin</th>
+              <th>Cash</th>
+              <th>Collateral</th>
+              <th>Payout Used</th>
+              <th>Market Orders</th>
+              <th>User Alias</th>
+              <th>User ID</th>
+              <th>Broker</th>
+              <th>API Key</th>
+              <th>API Secret</th>
+              <th>TOTP Secret</th>
+              <th>PIN</th>
+              <th>Historical API</th>
+              <th>SqOff Time</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="clientRows"></tbody>
+        </table>
+      </section>
+    </main>
+
+    <template id="rowTemplate">
+      <tr>
+        <td class="tiny"><input class="row-select" type="checkbox"></td>
+        <td><input class="enabled" type="checkbox" checked></td>
+        <td><button class="icon danger delete" type="button" title="Delete client">x</button></td>
+        <td><button class="icon logout" type="button" title="Logout client">o</button></td>
+        <td><button class="icon squareoff" type="button" title="Manual square off">*</button></td>
+        <td class="login-state">No</td>
+        <td class="money mtm-all">0.00</td>
+        <td class="money mis-mtm">0.00</td>
+        <td class="money nrml-mtm">0.00</td>
+        <td class="margin net-margin">0.00</td>
+        <td class="margin cash-margin">0.00</td>
+        <td class="margin collateral-margin">0.00</td>
+        <td class="margin payout-margin">0.00</td>
+        <td>
+          <select class="market-orders">
+            <option>Allowed</option>
+            <option>Blocked</option>
+          </select>
+        </td>
+        <td><input class="alias" type="text" placeholder="SIMULATED1"></td>
+        <td><input class="client-code" type="text" placeholder="CLIENT_ID"></td>
+        <td>
+          <select class="broker">
+            <option>Angel</option>
+            <option>APITest</option>
+            <option>KotakNeoV3</option>
+          </select>
+        </td>
+        <td><input class="api-key" type="text" placeholder="API key"></td>
+        <td><input class="api-secret" type="password" placeholder="API secret"></td>
+        <td><input class="totp-secret" type="password" placeholder="TOTP secret"></td>
+        <td><input class="pin" type="password" placeholder="PIN"></td>
+        <td><input class="historical-api" type="checkbox"></td>
+        <td><input class="sqoff-time" type="time" value="15:16"></td>
+        <td class="status">Idle</td>
+      </tr>
+    </template>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
