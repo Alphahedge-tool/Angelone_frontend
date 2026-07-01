@@ -221,10 +221,22 @@ export default function Basket({
 function BasketRow({ leg, liveTick, expiries = [], onRemoveLeg, onUpdateLeg, onResolveLeg }) {
   const isSell = leg.action === 'SELL';
   const isMarket = leg.priceType !== 'LIMIT';
-  // Live LTP from the option-chain feed overrides the value captured when the
-  // leg was added, so the basket ticks along in real time. Falls back to the
-  // captured value when this leg's contract isn't in the streaming chain.
-  const ltp = liveTick?.ltp ?? leg.ltp;
+  // Strike is edited in LOCAL state so typing doesn't mutate leg.strike on every
+  // keystroke — that used to defeat the "did the strike change?" guard on blur
+  // (leg.strike already equalled the typed value, so the re-resolve never
+  // fired). We commit via onResolveLeg on Enter/blur and re-sync when the leg's
+  // resolved strike changes (e.g. an off-grid strike snapped, or an expiry
+  // change re-resolved to a nearby strike).
+  const [strikeInput, setStrikeInput] = useState(leg.strike ?? '');
+  useEffect(() => { setStrikeInput(leg.strike ?? ''); }, [leg.strike]);
+  // Live LTP from the feed (every leg is subscribed, so this ticks even for
+  // legs off the on-screen chain). Falls back to the value captured at add/
+  // resolve time, and finally to the day's close so a leg with no live price
+  // (market closed / quote failed) still shows a real number instead of a dash.
+  const liveLtp = liveTick?.ltp;
+  const hasLive = liveLtp != null && liveLtp > 0;
+  const usingClose = !hasLive && !(leg.ltp > 0) && leg.close > 0;
+  const ltp = hasLive ? liveLtp : (leg.ltp > 0 ? leg.ltp : (leg.close ?? leg.ltp));
   const changePct = (liveTick && liveTick.ltp != null && liveTick.close)
     ? Number((((liveTick.ltp - liveTick.close) / liveTick.close) * 100).toFixed(2))
     : leg.changePct;
@@ -252,7 +264,11 @@ function BasketRow({ leg, liveTick, expiries = [], onRemoveLeg, onUpdateLeg, onR
           </span>
         </span>
         <span className="basket-stock-sub">
-          <span className={`basket-ltp${liveTick?.dir ? ` flash-${liveTick.dir}` : ''}`} key={liveTick?.at || 0}>{formatLtp(ltp)}</span>
+          <span
+            className={`basket-ltp${liveTick?.dir ? ` flash-${liveTick.dir}` : ''}${usingClose ? ' is-close' : ''}`}
+            key={liveTick?.at || 0}
+            title={usingClose ? "Day's close — no live price yet" : undefined}
+          >{formatLtp(ltp)}</span>
           {changePct != null && Number.isFinite(chg) && (
             <span className={`basket-chg ${chgClass}`}>
               {chg > 0 ? '▲' : chg < 0 ? '▼' : ''} {formatChange(changePct)}%
@@ -291,12 +307,13 @@ function BasketRow({ leg, liveTick, expiries = [], onRemoveLeg, onUpdateLeg, onR
               back to the old strike and race the first). */}
           <input
             type="number"
-            value={leg.strike ?? ''}
-            onChange={(event) => onUpdateLeg?.(leg.id, { strike: event.target.value })}
+            value={strikeInput}
+            onChange={(event) => setStrikeInput(event.target.value)}
             onKeyDown={(event) => { if (event.key === 'Enter') { event.target.blur(); } }}
             onBlur={(event) => {
               const next = Math.max(0, Number(event.target.value) || 0);
               if (next && next !== Number(leg.strike)) onResolveLeg?.(leg.id, { strike: next });
+              else setStrikeInput(leg.strike ?? ''); // snap back if unchanged/invalid
             }}
           />
           <span className="basket-stepper-arrows">

@@ -145,6 +145,7 @@ function App() {
     for (const index of targetIndexes) {
       const client = clients[index];
       if (!client?.enabled) continue;
+      if (client.loggedIn && (demoMode || client.session?.jwtToken)) continue;
 
       updateClient(index, { status: 'Logging in...', loggedIn: false, netMargin: '0.00' });
       try {
@@ -246,7 +247,15 @@ function App() {
         />
       )}
 
-      {activeTab !== 'settings' && activeTab !== 'strategies' && (
+      {activeTab === 'orders' && (
+        <OrderBookView
+          clients={clients}
+          demoMode={demoMode}
+          onClientSession={(index, session) => updateClient(index, { session })}
+        />
+      )}
+
+      {activeTab !== 'settings' && activeTab !== 'strategies' && activeTab !== 'orders' && (
         <EmptyState title={activeTab === 'orders' ? 'Order Book' : activeTab === 'positions' ? 'Positions' : 'Multi-leg'} />
       )}
     </main>
@@ -350,10 +359,386 @@ function ClientRow({ client, index, onChange, onDelete, onLogout, onToggleSelect
   );
 }
 
+function OrderBookView({ clients, demoMode, onClientSession }) {
+  const [bookTab, setBookTab] = useState('history');
+  const [clientIndex, setClientIndex] = useState(0);
+  const [rows, setRows] = useState([]);
+  const [status, setStatus] = useState('Select a logged-in account');
+  const [loading, setLoading] = useState(false);
+  const [query, setQuery] = useState('');
+
+  const loggedInIndexes = useMemo(
+    () => clients.map((client, index) => (client.loggedIn ? index : -1)).filter((index) => index >= 0),
+    [clients],
+  );
+  const selectedClient = clients[clientIndex];
+
+  useEffect(() => {
+    if (loggedInIndexes.length && !loggedInIndexes.includes(clientIndex)) {
+      setClientIndex(loggedInIndexes[0]);
+    }
+  }, [loggedInIndexes, clientIndex]);
+
+  useEffect(() => {
+    if (selectedClient?.loggedIn && !demoMode) loadBook(bookTab);
+  }, [bookTab, clientIndex, selectedClient?.session?.jwtToken, demoMode]);
+
+  async function loadBook(nextTab = bookTab) {
+    const client = clients[clientIndex];
+    if (!client?.loggedIn) {
+      setRows([]);
+      setStatus('Log in an account first');
+      return;
+    }
+    if (demoMode) {
+      setRows([]);
+      setStatus('Disable demo mode for live order book');
+      return;
+    }
+
+    setLoading(true);
+    setStatus(nextTab === 'trades' ? 'Loading trade book...' : 'Loading order book...');
+    try {
+      const response = await fetch(nextTab === 'trades' ? '/api/angel/trade-book' : '/api/angel/order-book', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ client }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || body.status === false) throw new Error(body.message || `HTTP ${response.status}`);
+      if (body.session?.jwtToken) onClientSession?.(clientIndex, body.session);
+      const nextRows = nextTab === 'trades' ? body.trades || [] : body.orders || [];
+      setRows(nextRows);
+      setStatus(`${nextRows.length} ${nextTab === 'trades' ? 'trades' : 'orders'} loaded`);
+    } catch (error) {
+      setRows([]);
+      setStatus(error.message || 'Book load failed');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const visibleRows = useMemo(() => {
+    const source = bookTab === 'open'
+      ? rows.filter((row) => isOpenOrder(row))
+      : rows;
+    const needle = query.trim().toLowerCase();
+    if (!needle) return source;
+    return source.filter((row) => JSON.stringify(row).toLowerCase().includes(needle));
+  }, [rows, bookTab, query]);
+  const summary = useMemo(() => bookSummary(visibleRows), [visibleRows]);
+  const orderHistoryCount = bookTab === 'trades' ? rows.length : rows.filter((row) => !isOpenOrder(row)).length;
+  const columns = useMemo(() => bookDisplayColumns(bookTab), [bookTab]);
+
+  return (
+    <section className="book-view">
+      <header className="book-top-tabs" aria-label="Order sections">
+        <div className="book-tabs" role="tablist" aria-label="Order book tabs">
+          <button className={bookTab === 'open' ? 'active' : ''} type="button" onClick={() => setBookTab('open')}>Open Orders</button>
+          <button className={bookTab === 'history' ? 'active' : ''} type="button" onClick={() => setBookTab('history')}>Order History ({orderHistoryCount})</button>
+          <button className={bookTab === 'trades' ? 'active' : ''} type="button" onClick={() => setBookTab('trades')}>Trades</button>
+          {['Stock SIP', 'GTT', 'Basket Orders', 'Alerts'].map((label) => (
+            <button className="muted" disabled key={label} type="button">{label}</button>
+          ))}
+        </div>
+      </header>
+
+      <div className="book-toolbar">
+        <label className="book-search">
+          <Search size={18} aria-hidden="true" />
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search" />
+        </label>
+        <button className="book-filter" type="button" title="Filters">≡</button>
+        <div className="book-toolbar-spacer" />
+        <PillSelect
+          title="Account"
+          value={String(clientIndex)}
+          onChange={(value) => setClientIndex(Number(value))}
+          options={clients.map((client, index) => ({
+            value: String(index),
+            label: client.alias || client.clientCode || `Client ${index + 1}`,
+            pill: client.loggedIn ? 'ON' : 'OFF',
+            pillClass: client.loggedIn ? 'pill-idx' : 'pill-eq',
+          }))}
+        />
+        <button className="btn secondary" disabled={loading} type="button" onClick={() => loadBook()}>
+          {loading ? 'Loading' : 'Refresh'}
+        </button>
+      </div>
+
+      <div className="book-summary">
+        <div>
+          <span className="buy">Total Buy</span>
+          <strong>{formatMoney(summary.buyValue)}</strong>
+          <em>{summary.buyCount} Transactions</em>
+        </div>
+        <div>
+          <span className="sell">Total Sell</span>
+          <strong>{formatMoney(summary.sellValue)}</strong>
+          <em>{summary.sellCount} Transactions</em>
+        </div>
+        <div>
+          <span>Today's Charges</span>
+          <strong>₹0.00</strong>
+          <em>{visibleRows.length} Transactions</em>
+        </div>
+      </div>
+
+      <div className="book-status">{status}</div>
+
+      <div className="book-table-wrap">
+        <table className="book-table">
+          <thead>
+            <tr>{columns.map((column) => <th key={column}>{bookLabel(column)}</th>)}</tr>
+          </thead>
+          <tbody>
+            {visibleRows.map((row, index) => (
+              <tr key={row.orderid || row.order_id || row.tradeid || row.fillid || index}>
+                {columns.map((column) => <td key={column}>{renderBookCell(row, column)}</td>)}
+              </tr>
+            ))}
+            {!visibleRows.length && (
+              <tr><td className="book-empty" colSpan={Math.max(columns.length, 1)}>No {bookTab === 'trades' ? 'trades' : 'orders'} to show</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function bookDisplayColumns(tab) {
+  return tab === 'trades'
+    ? ['stock', 'product', 'qty', 'executedPrice', 'orderId', 'time']
+    : ['stock', 'product', 'qty', 'placedPrice', 'executedPrice', 'ltp', 'status'];
+}
+
+function bookLabel(key) {
+  const labels = {
+    stock: 'Stock Name',
+    product: 'Product Type',
+    qty: 'Qty.',
+    placedPrice: 'Placed Price',
+    executedPrice: 'Executed Price',
+    ltp: 'LTP',
+    status: 'Status',
+    orderId: 'Order ID',
+    time: 'Time',
+  };
+  if (labels[key]) return labels[key];
+  return String(key).replace(/_/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').toUpperCase();
+}
+
+function renderBookCell(row, column) {
+  if (column === 'stock') return <BookStockCell row={row} />;
+  if (column === 'product') return <BookProductCell row={row} />;
+  if (column === 'qty') return <BookQtyCell row={row} />;
+  if (column === 'placedPrice') return formatOrderPrice(row.price, row.ordertype);
+  if (column === 'executedPrice') return <span className="book-price-strong">{formatBookPrice(row.averageprice || row.fillprice)}</span>;
+  if (column === 'ltp') return <span className="book-ltp">{formatBookPrice(row.ltp || row.close || row.averageprice || row.fillprice)}</span>;
+  if (column === 'status') return <BookStatusCell row={row} />;
+  if (column === 'orderId') return formatBookCell(row.orderid || row.order_id);
+  if (column === 'time') return formatBookCell(row.exchtime || row.updatetime || row.filltime);
+  return formatBookCell(row[column], column);
+}
+
+function BookStockCell({ row }) {
+  const symbol = String(row.tradingsymbol || row.symbolname || row.symbol || '-');
+  const parsed = parseTradingSymbol(symbol);
+  return (
+    <div className="book-stock-cell">
+      <div className="book-stock-line">
+        <strong>{parsed.root}</strong>
+        {row.exchange && <span className="book-tag exchange">{row.exchange}</span>}
+      </div>
+      {parsed.detail && (
+        <div className="book-stock-sub">
+          <span>{parsed.detail}</span>
+          {parsed.optionType && <span className={`book-tag option ${parsed.optionType.toLowerCase()}`}>{parsed.optionType}</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BookProductCell({ row }) {
+  const side = String(row.transactiontype || row.transaction_type || '').toUpperCase();
+  const product = compactProductTag(row.producttype || row.product_type || '-');
+  return (
+    <div className="book-product-cell">
+      {side && <span className={`book-tag side ${side === 'BUY' ? 'buy' : 'sell'}`}>{side}</span>}
+      <span className="book-tag product">{product}</span>
+    </div>
+  );
+}
+
+function compactProductTag(value) {
+  const product = String(value || '-').toUpperCase();
+  if (product === 'CARRYFORWARD' || product === 'NRML') return 'CF';
+  if (product === 'INTRADAY') return 'MIS';
+  return product;
+}
+
+function BookQtyCell({ row }) {
+  const qty = Number(row.quantity || 0) || 0;
+  const filled = Number(row.filledshares || row.fillshares || 0) || 0;
+  const lotSize = Number(row.lotsize || row.lotSize || row.lot_size || 0) || 0;
+  const unit = lotSize > 1 ? 'Lots' : 'Shares';
+  return (
+    <div className="book-qty-cell">
+      <span>{filled}/{qty} {unit}</span>
+      {lotSize > 1 && <small>(1 Lot = {lotSize})</small>}
+    </div>
+  );
+}
+
+function BookStatusCell({ row }) {
+  const state = String(row.status || row.orderstatus || '').toUpperCase();
+  const time = row.updatetime || row.exchtime || row.filltime || '';
+  const reason = orderReason(row);
+  return (
+    <div className="book-status-cell">
+      <div className="book-status-main">
+        {reason && (
+          <span className="book-reason-wrap">
+            <button className="book-reason-btn" type="button" aria-label={`Order reason: ${reason}`}>i</button>
+            <span className="book-reason-tip" role="tooltip">{renderReasonText(reason)}</span>
+          </span>
+        )}
+        {state ? <span className={`book-status-pill ${state.toLowerCase()}`}>{state}</span> : <span>-</span>}
+      </div>
+      {time && <small>{String(time)}</small>}
+    </div>
+  );
+}
+
+function orderReason(row) {
+  return String(
+    row.text ||
+    row.rejreason ||
+    row.rejectreason ||
+    row.rejectionreason ||
+    row.reason ||
+    row.message ||
+    ''
+  ).trim();
+}
+
+function renderReasonText(reason) {
+  const parts = String(reason).split(/(Insufficient Funds|Rs\.?\s*[\d,.]+)/gi);
+  return parts.map((part, index) => {
+    const important = /^(Insufficient Funds|Rs\.?\s*[\d,.]+)$/i.test(part);
+    return important ? <mark key={index}>{part}</mark> : <span key={index}>{part}</span>;
+  });
+}
+
+function inferOptionType(symbol) {
+  const text = String(symbol).toUpperCase();
+  if (/\bCE\b|CE$/.test(text)) return 'CE';
+  if (/\bPE\b|PE$/.test(text)) return 'PE';
+  return '';
+}
+
+function parseTradingSymbol(symbol) {
+  const text = String(symbol || '-').trim();
+  const spaced = text.match(/^([A-Z]+)\s+(.+?)\s+(CE|PE)$/i);
+  if (spaced) {
+    return { root: spaced[1].toUpperCase(), detail: spaced[2], optionType: spaced[3].toUpperCase() };
+  }
+
+  const compact = text.match(/^([A-Z]+)(\d+)(CE|PE)$/i);
+  if (compact) {
+    const [, root, digits, optionType] = compact;
+    const strike = digits.length > 5 ? digits.slice(-5) : digits;
+    const prefix = strike ? digits.slice(0, -strike.length) : digits;
+    const detail = [formatSymbolCode(prefix), trimStrike(strike)].filter(Boolean).join(' ');
+    return { root: root.toUpperCase(), detail, optionType: optionType.toUpperCase() };
+  }
+
+  const optionType = inferOptionType(text);
+  return { root: optionType ? text.slice(0, -2) : text, detail: '', optionType };
+}
+
+function formatSymbolCode(value) {
+  if (!value) return '';
+  const weekly5 = value.match(/^(\d{2})(\d)(\d{2})$/);
+  if (weekly5) return `${weekly5[3]} ${monthName(Number(weekly5[2]))} 20${weekly5[1]}`;
+  const weekly6 = value.match(/^(\d{2})(\d{2})(\d{2})$/);
+  if (weekly6) return `${weekly6[3]} ${monthName(Number(weekly6[2]))} 20${weekly6[1]}`;
+  if (value.length === 5) return `${value.slice(0, 2)} ${value.slice(2, 3)} ${value.slice(3)}`;
+  if (value.length === 6) return `${value.slice(0, 2)} ${value.slice(2, 4)} ${value.slice(4)}`;
+  return value;
+}
+
+function trimStrike(value) {
+  return String(value || '').replace(/^0+(?=\d)/, '');
+}
+
+function monthName(month) {
+  return ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][month - 1] || '';
+}
+
+function formatOrderPrice(price, orderType) {
+  const type = String(orderType || '').toUpperCase();
+  if (type === 'MARKET' || type === 'MKT') return 'MKT';
+  return formatBookPrice(price);
+}
+
+function formatBookPrice(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num === 0) return '-';
+  return num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function formatBookCell(value, column = '') {
+  if (value == null || value === '') return '-';
+  if (/status/i.test(column)) {
+    const state = String(value).toUpperCase();
+    return <span className={`book-status-pill ${state.toLowerCase()}`}>{state}</span>;
+  }
+  if (/transactiontype/i.test(column)) {
+    const side = String(value).toUpperCase();
+    return <span className={side === 'BUY' ? 'book-buy' : side === 'SELL' ? 'book-sell' : ''}>{side}</span>;
+  }
+  if (typeof value === 'number') return Number.isFinite(value) ? value.toLocaleString('en-IN') : '-';
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+}
+
+function isOpenOrder(row) {
+  const state = String(row?.status || row?.orderstatus || '').toUpperCase();
+  return state && !['COMPLETE', 'COMPLETED', 'REJECTED', 'CANCELLED', 'CANCELED'].includes(state);
+}
+
+function bookSummary(rows) {
+  return rows.reduce((acc, row) => {
+    const side = String(row.transactiontype || row.transaction_type || '').toUpperCase();
+    const qty = Number(row.quantity || row.filledshares || row.fillshares || 0) || 0;
+    const price = Number(row.averageprice || row.fillprice || row.price || 0) || 0;
+    const value = qty * price;
+    if (side === 'BUY') {
+      acc.buyCount += 1;
+      acc.buyValue += value;
+    }
+    if (side === 'SELL') {
+      acc.sellCount += 1;
+      acc.sellValue += value;
+    }
+    return acc;
+  }, { buyCount: 0, sellCount: 0, buyValue: 0, sellValue: 0 });
+}
+
 function Strategies({ clients, demoMode, onClientSession }) {
   // Basket legs live here (above the option chain) so Buy/Sell clicks from the
   // chain accumulate into the basket shown on the right.
   const [legs, setLegs] = useState([]);
+  // Always-current mirror of legs so async callbacks (resolve) read the LATEST
+  // leg — including changes from an earlier resolve still in flight. Capturing
+  // the target inside a setLegs updater was racy when expiry AND strike changed
+  // back-to-back; the ref makes each resolve see the merged, up-to-date leg.
+  const legsRef = useRef([]);
+  legsRef.current = legs;
   // Which logged-in client (with its session) the margin/charges calculators
   // should use — the same account that loaded the option chain.
   const [marginClient, setMarginClient] = useState(null);
@@ -393,6 +778,10 @@ function Strategies({ clients, demoMode, onClientSession }) {
   // then read the LTP/token straight from the cache — instant, no per-strike
   // backend call, no races.
   const chainCache = useRef({});
+  // In-flight chain loads keyed by "SYMBOL|EXPIRY" so a strike change that lands
+  // while the same expiry's chain is still loading reuses the one request
+  // instead of firing a second identical option-chain call.
+  const chainPending = useRef({});
 
   // Pull a strike's contract (token, ltp, lotSize, etc.) out of a cached chain.
   const lookupFromChain = (chain, strike, optionType) => {
@@ -413,6 +802,7 @@ function Strategies({ clients, demoMode, onClientSession }) {
     return {
       strike: chain.strikes[idx],
       ltp: ltp ?? null,
+      close: close ?? null,
       changePct,
       token,
       tradingSymbol,
@@ -426,17 +816,26 @@ function Strategies({ clients, demoMode, onClientSession }) {
   const loadExpiryChain = useCallback(async (symbol, expiry) => {
     const key = `${symbol}|${expiry}`;
     if (chainCache.current[key]) return chainCache.current[key];
+    if (chainPending.current[key]) return chainPending.current[key]; // reuse in-flight
     const liveClient = marginClientRef.current;
     if (!liveClient?.session?.jwtToken) return null;
-    const res = await fetch('/api/angel/option-chain', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ client: liveClient, symbol, expiry, window: 30 }),
-    });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok || body.status === false) throw new Error(body.message || 'Chain load failed');
-    chainCache.current[key] = body;
-    return body;
+    const request = (async () => {
+      const res = await fetch('/api/angel/option-chain', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ client: liveClient, symbol, expiry, window: 30 }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || body.status === false) throw new Error(body.message || 'Chain load failed');
+      chainCache.current[key] = body;
+      return body;
+    })();
+    chainPending.current[key] = request;
+    try {
+      return await request;
+    } finally {
+      delete chainPending.current[key];
+    }
   }, []);
 
   // Re-resolve a leg when a contract-defining field changes (strike/expiry/side).
@@ -444,13 +843,14 @@ function Strategies({ clients, demoMode, onClientSession }) {
   // read the new strike's LTP + token from that cached chain. Strike/side changes
   // are then instant local lookups. Falls back to /resolve-leg if uncached.
   const resolveLegContract = useCallback(async (id, changes = {}) => {
-    let target = null;
-    setLegs((current) => {
-      const found = current.find((leg) => leg.id === id);
-      if (found) target = { ...found, ...changes };
-      return current.map((leg) => (leg.id === id ? { ...leg, ...changes, resolving: true } : leg));
-    });
-    if (!target) return;
+    // Read the target from the always-current ref (NOT inside the setLegs
+    // updater) so a strike change that lands while an expiry change is still
+    // resolving sees the merged leg — both edits are applied, not lost.
+    const found = legsRef.current.find((leg) => leg.id === id);
+    if (!found) return;
+    const target = { ...found, ...changes };
+    // Apply the field changes optimistically and mark the leg resolving.
+    setLegs((current) => current.map((leg) => (leg.id === id ? { ...leg, ...changes, resolving: true } : leg)));
 
     const seq = (resolveSeq.current[id] || 0) + 1;
     resolveSeq.current[id] = seq;
@@ -477,6 +877,7 @@ function Strategies({ clients, demoMode, onClientSession }) {
           exchange: hit.exchange,
           lotSize: hit.lotSize,
           ltp: hit.ltp,
+          close: hit.close,
           changePct: hit.changePct,
           resolveError: null,
         });
@@ -508,6 +909,7 @@ function Strategies({ clients, demoMode, onClientSession }) {
         exchange: body.exchange || target.exchange,
         lotSize: body.lotSize || target.lotSize,
         ltp: body.ltp ?? null,
+        close: body.close ?? null,
         changePct: body.changePct ?? null,
         resolveError: body.quoteError || null,
       });
@@ -532,6 +934,49 @@ function Strategies({ clients, demoMode, onClientSession }) {
     }));
     setMarginNonce((n) => n + 1);
   }, []);
+
+  // Distinct set of basket-leg contracts to keep live: "exchange|token". A leg
+  // on a different expiry/symbol than the on-screen chain has a token the chain
+  // feed never subscribed, so without this its LTP would freeze. Recomputed only
+  // when the leg tokens actually change (not on every tick / qty edit).
+  const legFeedKey = useMemo(() => {
+    const seen = new Set();
+    for (const leg of legs) {
+      if (leg.token != null) seen.add(`${leg.exchange || 'NFO'}|${leg.token}`);
+    }
+    return [...seen].sort().join(',');
+  }, [legs]);
+
+  // Keep the live feed in sync with EXACTLY the basket's current leg tokens.
+  // We send the full current set and let the server reconcile: it subscribes new
+  // tokens and unsubscribes ones the basket dropped. So when a leg changes strike
+  // or expiry, its OLD token is released and only the NEW one stays subscribed —
+  // nothing accumulates toward Angel's 1000-token cap. Fires only when the leg
+  // token set actually changes (not per tick / qty edit), or on account change.
+  useEffect(() => {
+    const client = marginClientRef.current;
+    const session = client?.session;
+    if (!session?.jwtToken || !session?.feedToken) return;
+
+    const items = (legFeedKey ? legFeedKey.split(',') : []).map((pair) => {
+      const [exchange, token] = pair.split('|');
+      return { exchange, token };
+    });
+
+    fetch('/api/angel/basket-tokens', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        credentials: {
+          jwtToken: session.jwtToken,
+          feedToken: session.feedToken,
+          apiKey: client.apiKey,
+          clientCode: client.clientCode,
+        },
+        items, // the FULL current basket set; server diffs against the previous
+      }),
+    }).catch((error) => console.error('basket-tokens sync failed:', error));
+  }, [legFeedKey, marginClient]);
 
   const removeLeg = useCallback((id) => {
     setLegs((current) => current.filter((leg) => leg.id !== id));
@@ -604,13 +1049,16 @@ function Strategies({ clients, demoMode, onClientSession }) {
       ]);
       if (cancelled) return;
 
+      let nextSession = null;
       if (marginOut.status === 'fulfilled') {
+        nextSession = marginOut.value.session || nextSession;
         setMargin({ status: 'ready', value: Number(marginOut.value.totalMarginRequired || 0), message: '' });
       } else {
         setMargin({ status: 'error', value: 0, message: marginOut.reason?.message || 'Margin failed' });
       }
 
       if (chargesOut.status === 'fulfilled') {
+        nextSession = chargesOut.value.session || nextSession;
         setCharges({
           status: 'ready',
           value: Number(chargesOut.value.totalCharges || 0),
@@ -619,6 +1067,10 @@ function Strategies({ clients, demoMode, onClientSession }) {
         });
       } else {
         setCharges({ status: 'error', value: 0, breakup: null, message: chargesOut.reason?.message || 'Charges failed' });
+      }
+
+      if (nextSession?.jwtToken && nextSession.jwtToken !== marginClientRef.current?.session?.jwtToken) {
+        setMarginClient((current) => (current ? { ...current, session: nextSession } : current));
       }
     }, 400);
 
@@ -670,6 +1122,7 @@ const OptionChainPanel = React.memo(function OptionChainPanel({ clients, demoMod
   const [feedOn, setFeedOn] = useState(false);
   const esRef = useRef(null);              // active EventSource
   const prevRef = useRef({});              // token -> last ltp (for tick direction)
+  const autoLoadRef = useRef('');
 
   // High-frequency tick buffering: ticks land in refs synchronously (no React
   // work), and a single rAF loop flushes them to state at most once per frame.
@@ -782,13 +1235,19 @@ const OptionChainPanel = React.memo(function OptionChainPanel({ clients, demoMod
     setLoading(true);
     setStatus('Loading option chain...');
     try {
-      const response = await fetch('/api/angel/option-chain', {
+      // ── Phase 1: instant skeleton from OUR scrip master (no Angel round-trip
+      // for the ladder). Renders every strike + tokens immediately, then the
+      // live feed streams prices in — the same two-phase pattern Angel's own web
+      // app uses (all-scrip-options → live). spot/atm come from one cheap quote.
+      const skelRes = await fetch('/api/angel/all-scrip-options', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ client, symbol, expiry }),
+        body: JSON.stringify({ client, TradeSymbol: symbol, ExpiryDate: expiry }),
       });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok || body.status === false) throw new Error(body.message || `HTTP ${response.status}`);
+      const skeleton = await skelRes.json().catch(() => ({}));
+      if (!skelRes.ok || skeleton.status === false) throw new Error(skeleton.message || `HTTP ${skelRes.status}`);
+
+      // Reset live state for the new chain.
       setLive({});
       onLiveTicks?.({});
       setLiveSpot(null);
@@ -796,20 +1255,65 @@ const OptionChainPanel = React.memo(function OptionChainPanel({ clients, demoMod
       liveRef.current = {};
       spotRef.current = null;
       dirtyRef.current = false;
-      setChain(body);
-      const liveSession = body.session || client.session || null;
+
+      // The skeleton endpoint logs in if needed and returns the feed block +
+      // session (fresh feedToken), so the live feed can start reliably.
+      const liveSession = skeleton.session || client.session || null;
+      const liveClient = { ...client, session: liveSession };
+
+      // Render the skeleton right away (OI/LTP arrays start empty; live fills them).
+      setChain(skeleton);
       onClientSession(clientIndex, liveSession);
-      // Hand the margin calculator the same logged-in account (with its fresh
-      // session) that just loaded this chain.
-      onMarginContext?.({ ...client, session: liveSession });
-      setStatus(`Loaded ${body.symbol} ${body.expiry}`);
-      startLiveFeed(body);
+      onMarginContext?.(liveClient);
+      setStatus(`Loaded ${skeleton.symbol} ${skeleton.expiry} (${skeleton.count} scrips)`);
+      startLiveFeed(skeleton);
+
+      // ── Phase 2: prices in the BACKGROUND (doesn't block the render above).
+      // The ladder is already on screen; this fills LTP/OI/close for every strike
+      // (live ticks overlay it during market hours; after hours it's the close).
+      // Because the skeleton and this response share the same strike order, we
+      // merge by INDEX. Only apply if this is still the chain on screen.
+      fetch('/api/angel/chain-prices', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ client: liveClient, TradeSymbol: symbol, ExpiryDate: expiry }),
+      })
+        .then((r) => r.json().catch(() => ({})))
+        .then((p) => {
+          if (!p || p.status === false || !Array.isArray(p.strikes)) return;
+          setChain((current) => {
+            // Guard against a stale response for a chain the user already switched away from.
+            if (!current || current.symbol !== skeleton.symbol || current.expiry !== skeleton.expiry) return current;
+            return {
+              ...current,
+              spot: p.spot ?? current.spot,
+              atm: p.atm ?? current.atm,
+              pcr: p.pcr ?? current.pcr ?? 0,
+              callOI: p.callOI, putOI: p.putOI,
+              callLtp: p.callLtp, putLtp: p.putLtp,
+              callClose: p.callClose, putClose: p.putClose,
+            };
+          });
+        })
+        .catch(() => { /* prices are best-effort; live feed still fills them */ });
     } catch (error) {
       setStatus(error.message || 'Option chain failed');
     } finally {
       setLoading(false);
     }
   }
+
+  useEffect(() => {
+    const client = clients[clientIndex];
+    if (!symbol || !expiry || loading || demoMode) return;
+    if (!client?.loggedIn || !client.apiKey) return;
+    if (!client.session?.jwtToken && (!client.pin || !client.totpSecret)) return;
+
+    const key = `${clientIndex}|${symbol}|${expiry}`;
+    if (autoLoadRef.current === key) return;
+    autoLoadRef.current = key;
+    loadChain();
+  }, [clients, clientIndex, symbol, expiry, loading, demoMode]);
 
   // Keep refs current so onTrade (memoized with no deps) reads live values.
   symbolRef.current = symbol;
@@ -822,7 +1326,7 @@ const OptionChainPanel = React.memo(function OptionChainPanel({ clients, demoMod
   // action buttons; current symbol/expiry/exchange/lotSize come from refs.
   // tradingSymbol is the per-strike contract symbol (e.g. NIFTY...CE) needed by
   // the charges estimator; passed through from the clicked row.
-  const onTrade = useCallback((side, action, strike, token, ltp, changePct, tradingSymbol) => {
+  const onTrade = useCallback((side, action, strike, token, ltp, changePct, tradingSymbol, close) => {
     onAddLeg?.({
       symbol: symbolRef.current,
       tradingSymbol: tradingSymbol || null,
@@ -837,6 +1341,7 @@ const OptionChainPanel = React.memo(function OptionChainPanel({ clients, demoMod
       price: '',
       priceType: 'MARKET',
       ltp: ltp ?? null,
+      close: close ?? null,   // day's close — LTP fallback when no live tick
       changePct: changePct ?? null,
       token: token ?? null,
       selected: true,
@@ -1122,11 +1627,11 @@ const ChainRow = React.memo(function ChainRow({
         <span className="ltp-val">{formatPrice(callLtp)}</span>
       </td>
       <td className={`action call-action${callItm ? ' itm-call' : ''}`}>
-        <TradeActions side="call" strike={strike} token={callToken} symbol={callSymbol} ltp={callLtp} chg={callChg} onTrade={onTrade} />
+        <TradeActions side="call" strike={strike} token={callToken} symbol={callSymbol} ltp={callLtp} chg={callChg} close={callClose} onTrade={onTrade} />
       </td>
       <td className="strike">{strike}</td>
       <td className={`action put-action${putItm ? ' itm-put' : ''}`}>
-        <TradeActions side="put" strike={strike} token={putToken} symbol={putSymbol} ltp={putLtp} chg={putChg} onTrade={onTrade} />
+        <TradeActions side="put" strike={strike} token={putToken} symbol={putSymbol} ltp={putLtp} chg={putChg} close={putClose} onTrade={onTrade} />
       </td>
       <td className={`ltp put-ltp${putItm ? ' itm-put' : ''}${putDir ? ` flash-${putDir}` : ''}`} key={`pl-${putAt}`}>
         <span className="ltp-val">{formatPrice(putLtp)}</span>
@@ -1147,7 +1652,7 @@ const ChainRow = React.memo(function ChainRow({
 // Default React.memo (shallow compare): the buttons re-render when ltp/chg
 // change so a click always captures the CURRENT live price for the basket leg.
 // These are two tiny buttons, so per-tick re-rendering is cheap.
-const TradeActions = React.memo(function TradeActions({ side, strike, token, symbol, ltp, chg, onTrade }) {
+const TradeActions = React.memo(function TradeActions({ side, strike, token, symbol, ltp, chg, close, onTrade }) {
   const label = side === 'call' ? 'Call' : 'Put';
   const disabled = !token;
   return (
@@ -1157,14 +1662,14 @@ const TradeActions = React.memo(function TradeActions({ side, strike, token, sym
         type="button"
         title={`Buy ${label} ${strike}`}
         disabled={disabled}
-        onClick={() => onTrade?.(side, 'BUY', strike, token, ltp, chg, symbol)}
+        onClick={() => onTrade?.(side, 'BUY', strike, token, ltp, chg, symbol, close)}
       >B</button>
       <button
         className="trade-btn sell"
         type="button"
         title={`Sell ${label} ${strike}`}
         disabled={disabled}
-        onClick={() => onTrade?.(side, 'SELL', strike, token, ltp, chg, symbol)}
+        onClick={() => onTrade?.(side, 'SELL', strike, token, ltp, chg, symbol, close)}
       >S</button>
     </div>
   );

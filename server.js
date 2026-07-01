@@ -35,11 +35,21 @@ const MCX_SYMBOLS = new Set([
 
 // ─── Live market feed (Angel SmartWebSocket 2.0 → browser SSE) ───
 // One upstream WebSocket to Angel; browser clients attach via SSE and get
-// {token, ltp, oi} ticks. Re-subscribing replaces the active token list.
+// {token, ltp, oi} ticks. The subscription is ADDITIVE: we keep a union of all
+// tokens anyone cares about (the on-screen option chain AND every basket leg,
+// which may live on other expiries/symbols) so each leg ticks live like a real
+// broker basket. New tokens are sent as incremental subscribe frames on the
+// existing socket; the socket is only torn down on a full reset (new chain load)
+// or when the last SSE listener leaves.
 const sseClients = new Set();
 let feedSocket = null;
 let feedHeartbeat = null;
-let feedSubscription = null; // { credentials, tokenList }
+let feedCredentials = null;           // creds for the active upstream connection
+const feedTokens = new Map();         // exchangeType -> Set(token) — the live union
+// The on-screen chain's own tokens ("exchangeType|token"), tracked separately so
+// a new chain load can drop the PREVIOUS chain's strikes from the union without
+// disturbing basket-leg tokens (which may sit on other expiries/symbols).
+let chainTokenKeys = new Set();
 
 function broadcastTick(tick) {
   const line = `data: ${JSON.stringify(tick)}\n\n`;
@@ -55,9 +65,36 @@ function broadcastStatus(status) {
   }
 }
 
-// Open (or replace) the upstream Angel feed for a given token list.
-function startFeed(credentials, tokenList) {
-  feedSubscription = { credentials, tokenList };
+// Serialize the current union map into Angel's tokenList shape, dropping any
+// empty exchange groups.
+function currentTokenList() {
+  return [...feedTokens.entries()]
+    .filter(([, set]) => set.size > 0)
+    .map(([exchangeType, set]) => ({ exchangeType, tokens: [...set] }));
+}
+
+// Send a subscribe frame for a specific tokenList on the open socket. mode 3 =
+// SNAP_QUOTE (LTP + OI + close). Angel ignores tokens already subscribed, so
+// re-sending the union on reconnect is safe.
+function sendSubscribe(socket, tokenList, tag = 'optionchain') {
+  if (!tokenList.length) return;
+  socket.send(JSON.stringify({
+    correlationID: tag,
+    action: 1, // subscribe
+    params: { mode: 3, tokenList },
+  }));
+}
+
+// Open the upstream Angel feed (if not already open) and subscribe the whole
+// current union. Re-uses the socket when it's already live for the same creds.
+function startFeed(credentials) {
+  feedCredentials = credentials;
+
+  // Socket already open → just (re)subscribe the union; no teardown needed.
+  if (feedSocket && feedSocket.readyState === WebSocket.OPEN) {
+    sendSubscribe(feedSocket, currentTokenList());
+    return;
+  }
   closeFeed();
 
   const socket = new WebSocket(SMART_STREAM_URL, {
@@ -76,13 +113,10 @@ function startFeed(credentials, tokenList) {
   });
 
   socket.on('open', () => {
+    const tokenList = currentTokenList();
     if (FEED_DEBUG) console.log('[feed] WS OPEN → sending subscribe', JSON.stringify(tokenList));
     broadcastStatus({ connected: true, message: 'Live feed connected' });
-    socket.send(JSON.stringify({
-      correlationID: 'optionchain',
-      action: 1, // subscribe
-      params: { mode: 3, tokenList }, // mode 3 = SNAP_QUOTE (LTP + OI)
-    }));
+    sendSubscribe(socket, tokenList);
     clearInterval(feedHeartbeat);
     feedHeartbeat = setInterval(() => {
       if (socket.readyState === WebSocket.OPEN) socket.send('ping');
@@ -118,12 +152,38 @@ function startFeed(credentials, tokenList) {
   });
 }
 
-function closeFeed() {
+// Drop the upstream socket. Does NOT clear the token union — a reconnect
+// re-subscribes it. Pass reset=true (last listener gone) to also forget tokens
+// and credentials so a stale union can't be re-subscribed on the next chain load.
+function closeFeed(reset = false) {
   clearInterval(feedHeartbeat);
   if (feedSocket) {
     try { feedSocket.removeAllListeners(); feedSocket.terminate(); } catch {}
     feedSocket = null;
   }
+  if (reset) {
+    feedTokens.clear();
+    chainTokenKeys = new Set();
+    feedCredentials = null;
+  }
+}
+
+// Merge tokens into the live union. Returns only the tokens that are NEW (not
+// already subscribed) grouped by exchangeType, so callers can send a minimal
+// incremental subscribe frame.
+function mergeFeedTokens(entries) {
+  const added = new Map(); // exchangeType -> [token]
+  for (const { exchangeType, token } of entries) {
+    if (!token) continue;
+    const key = String(token);
+    if (!feedTokens.has(exchangeType)) feedTokens.set(exchangeType, new Set());
+    const set = feedTokens.get(exchangeType);
+    if (set.has(key)) continue;
+    set.add(key);
+    if (!added.has(exchangeType)) added.set(exchangeType, []);
+    added.get(exchangeType).push(key);
+  }
+  return [...added.entries()].map(([exchangeType, tokens]) => ({ exchangeType, tokens }));
 }
 
 // Parse one SmartWebSocket V2 binary packet → { token, ltp, oi, close }.
@@ -213,6 +273,13 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === 'POST' && req.url === '/api/angel/subscribe-more') {
+      const body = await readJson(req);
+      const result = addFeedTokens(body);
+      sendJson(res, 200, result);
+      return;
+    }
+
     if (req.method === 'GET') {
       await serveStatic(req, res);
       return;
@@ -246,46 +313,95 @@ function handleStream(req, res) {
   req.on('close', () => {
     clearInterval(keepAlive);
     sseClients.delete(res);
-    if (!sseClients.size) closeFeed(); // no listeners → drop upstream feed
+    if (!sseClients.size) closeFeed(true); // no listeners → drop feed + forget tokens
   });
 }
 
-// Start/replace the Angel feed for the tokens of a loaded option chain.
+// Turn a flat token list (+ optional spot) into {exchangeType, token} entries,
+// grouping by SmartWebSocket exchangeType. The spot/underlying may sit on a
+// different exchange (e.g. NSE index vs NFO options).
+function toFeedEntries({ exchange = 'NFO', tokens = [], spot = null }) {
+  const entries = [];
+  const type = (exch) => WS_EXCHANGE_TYPE[exch] || WS_EXCHANGE_TYPE.NFO;
+  for (const token of tokens) if (token) entries.push({ exchangeType: type(exchange), token });
+  if (spot?.token) entries.push({ exchangeType: type(spot.exchange || exchange), token: spot.token });
+  return entries;
+}
+
+// Point the feed at a freshly loaded option chain. Drops the PREVIOUS chain's
+// strikes from the union (so old, off-screen strikes stop ticking) but PRESERVES
+// basket-leg tokens — the basket may hold contracts on other expiries/symbols
+// that this chain doesn't include, and they must keep ticking. The socket stays
+// alive if it's already open. Basket legs are (re)added by the client via
+// addFeedTokens right after; the two are order-independent because we never wipe
+// non-chain tokens here.
 // Body: { credentials, exchange, tokens:[], spot:{token,exchange} }
-// The spot/underlying may sit on a different exchange (e.g. NSE index vs NFO
-// options), so we group everything by exchangeType.
 function subscribeFeed({ credentials = {}, exchange = 'NFO', tokens = [], spot = null } = {}) {
   if (!credentials.jwtToken || !credentials.feedToken) {
     throw new Error('Live feed needs an active session (jwtToken + feedToken)');
   }
   if (!tokens.length) throw new Error('No tokens to subscribe');
 
-  const byExchange = new Map(); // exchangeType -> Set(tokens)
-  const add = (exch, token) => {
-    if (!token) return;
-    const type = WS_EXCHANGE_TYPE[exch] || WS_EXCHANGE_TYPE.NFO;
-    if (!byExchange.has(type)) byExchange.set(type, new Set());
-    byExchange.get(type).add(String(token));
-  };
-  for (const token of tokens) add(exchange, token);
-  if (spot?.token) add(spot.exchange || exchange, spot.token);
-
-  const tokenList = [...byExchange.entries()].map(([exchangeType, set]) => ({
-    exchangeType,
-    tokens: [...set],
-  }));
+  const entries = toFeedEntries({ exchange, tokens, spot });
+  const newChainKeys = new Set(entries.map((e) => `${e.exchangeType}|${e.token}`));
+  // Remove the old chain's tokens that neither belong to the new chain nor were
+  // added by anything else (basket legs live outside chainTokenKeys, so they're
+  // never in this set and thus never removed).
+  for (const key of chainTokenKeys) {
+    if (newChainKeys.has(key)) continue;
+    const [type, token] = key.split('|');
+    feedTokens.get(Number(type))?.delete(token);
+  }
+  chainTokenKeys = newChainKeys;
+  const added = mergeFeedTokens(entries);
 
   if (FEED_DEBUG) {
     const mask = (v) => (v ? `${String(v).slice(0, 6)}…(${String(v).length})` : 'MISSING');
-    console.log(`[feed] subscribe exchange=${exchange} groups=${tokenList.length} tokens=${tokens.length}+spot`, tokens.slice(0, 3));
+    console.log(`[feed] subscribe(reset) exchange=${exchange} groups=${added.length} tokens=${tokens.length}+spot`, tokens.slice(0, 3));
     console.log('[feed] spot token=' + (spot?.token || 'none') + ' exch=' + (spot?.exchange || '-'));
     console.log('[feed] creds: jwt=' + mask(credentials.jwtToken),
       'feedToken=' + mask(credentials.feedToken),
       'apiKey=' + mask(credentials.apiKey),
       'client=' + (credentials.clientCode || 'MISSING'));
   }
-  startFeed(credentials, tokenList);
+  startFeed(credentials); // opens (or re-subscribes the union on) the socket
   return { status: true, subscribed: tokens.length, exchange };
+}
+
+// Additively subscribe more tokens (the basket's legs) WITHOUT disturbing the
+// on-screen chain feed. Legs may sit on other expiries/symbols, so each carries
+// its own exchange. Only genuinely new tokens hit the wire (incremental frame).
+// Body: { credentials?, items:[{ exchange, token }] }
+function addFeedTokens({ credentials = null, items = [] } = {}) {
+  const creds = credentials?.jwtToken ? credentials : feedCredentials;
+  if (!creds?.jwtToken || !creds?.feedToken) {
+    throw new Error('Live feed needs an active session (jwtToken + feedToken)');
+  }
+  const entries = (items || [])
+    .filter((it) => it && it.token)
+    .map((it) => ({
+      exchangeType: WS_EXCHANGE_TYPE[it.exchange] || WS_EXCHANGE_TYPE.NFO,
+      token: it.token,
+    }));
+  const added = mergeFeedTokens(entries);
+
+  if (!added.length) {
+    // Nothing new — but make sure the socket is alive so existing legs still tick.
+    if (!feedSocket) startFeed(creds);
+    return { status: true, added: 0 };
+  }
+
+  if (feedSocket && feedSocket.readyState === WebSocket.OPEN) {
+    // Socket already up → send just the new tokens.
+    if (FEED_DEBUG) console.log('[feed] add tokens (incremental)', JSON.stringify(added));
+    sendSubscribe(feedSocket, added, 'basket');
+  } else {
+    // No socket yet (basket populated before any chain) → open it on the union.
+    if (FEED_DEBUG) console.log('[feed] add tokens (open socket)', JSON.stringify(added));
+    startFeed(creds);
+  }
+  const total = added.reduce((n, g) => n + g.tokens.length, 0);
+  return { status: true, added: total };
 }
 
 // Returns the client's existing session as-is when it carries a JWT, so the

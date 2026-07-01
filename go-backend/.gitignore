@@ -1,0 +1,7 @@
+# Compiled binary
+angelone-backend
+angelone-backend.exe
+
+# Local scrip-master caches (regenerated on boot)
+scrip_master.json
+scrip_index.json
