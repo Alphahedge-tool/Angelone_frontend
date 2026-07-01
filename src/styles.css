@@ -741,6 +741,8 @@ select { min-width: 96px; }
   font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
+/* ATM box tints blue while the live ATM has drifted off the loaded snapshot. */
+.chain-meta strong.atm-shifted { color: var(--ao-blue); }
 
 /* Table */
 .chain-table-wrap { overflow: auto; min-height: 0; background: var(--ao-surface); }

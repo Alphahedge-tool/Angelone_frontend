@@ -935,6 +935,11 @@ const OptionChainPanel = React.memo(function OptionChainPanel({ clients, demoMod
     return strikes.reduce((best, s) => (Math.abs(s - price) < Math.abs(best - price) ? s : best), strikes[0]);
   }, [liveSpot, chain]);
 
+  // The ATM the table renders against — live value when the spot feed is up,
+  // else the snapshot from load. Drives the ATM box, the highlighted ATM row and
+  // the ITM shading, so all three shift together as the underlying moves.
+  const atm = liveAtm ?? chain?.atm ?? 0;
+
   return (
     <aside className="option-chain-panel">
       <header className="chain-titlebar">
@@ -1005,7 +1010,7 @@ const OptionChainPanel = React.memo(function OptionChainPanel({ clients, demoMod
             {formatMoney(liveSpot?.ltp ?? chain?.spot ?? 0)}
           </strong>
         </span>
-        <span>ATM <strong>{liveAtm || chain?.atm || 0}</strong></span>
+        <span>ATM <strong className={liveAtm && chain?.atm && liveAtm !== chain.atm ? 'atm-shifted' : ''}>{atm}</strong></span>
         <span>PCR <strong>{Number(chain?.pcr || 0).toFixed(2)}</strong></span>
       </div>
 
@@ -1050,9 +1055,9 @@ const OptionChainPanel = React.memo(function OptionChainPanel({ clients, demoMod
                 <ChainRow
                   key={strike}
                   strike={strike}
-                  isAtm={strike === chain.atm}
-                  callItm={strike < chain.atm}
-                  putItm={strike > chain.atm}
+                  isAtm={strike === atm}
+                  callItm={strike < atm}
+                  putItm={strike > atm}
                   callLtp={callTick?.ltp ?? chain.callLtp?.[index]}
                   putLtp={putTick?.ltp ?? chain.putLtp?.[index]}
                   callOi={Number(callTick?.oi ?? chain.callOI?.[index] ?? 0)}
